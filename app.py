@@ -8,52 +8,58 @@ st.set_page_config(page_title="Tesorería Grupo Ferretti", page_icon="🏦", lay
 
 modulo = st.sidebar.radio(
     "Módulo de Tesorería:",
-    ["🏦 Bancos BCP (9 Empresas)", "💳 Tarjetas (Culqi / Mercado Pago)"],
+    [
+        "🏪 Bancos Retail (FP Stores / Surco)",
+        "🏢 Bancos Grupo (7 Empresas)",
+        "💳 Tarjetas (Culqi / Mercado Pago)",
+    ],
 )
 
 d = st.secrets["drive"]
 
-# ==============================================================================
-# MÓDULO 1: BANCOS BCP
-# ==============================================================================
-if modulo == "🏦 Bancos BCP (9 Empresas)":
-    st.title("🏦 Procesar ingresos BCP — Grupo Ferretti")
+
+def render_modulo_bancos(clave_secret, nombre_archivo_excel, titulo_pagina, prefix_key):
+    st.title(titulo_pagina)
     st.write("1. Sube los reportes del banco (históricos o diarios). 2. Revisa la simulación. 3. Confirma.")
-    st.info("Antes de procesar, cierra el archivo 'BCP Diario 2026.xlsm' en Excel.")
+    st.info(f"Antes de procesar, cierra el archivo '{nombre_archivo_excel}' en Excel.")
+
+    target_id = d.get(clave_secret, "")
+    if not target_id:
+        st.warning(f"Falta configurar '{clave_secret}' en los Secrets de Streamlit.")
 
     archivos = st.file_uploader(
         "Reportes del BCP (.xls / .xlsx)",
         type=["xls", "xlsx"],
         accept_multiple_files=True,
-        key="up_bcp",
+        key=f"up_{prefix_key}",
     )
 
-    if st.button("1) Ver simulación (no guarda nada)", key="sim_bcp"):
-        if not archivos:
-            st.warning("Selecciona al menos un archivo.")
+    if st.button("1) Ver simulación (no guarda nada)", key=f"sim_{prefix_key}"):
+        if not archivos or not target_id:
+            st.warning("Selecciona al menos un archivo y verifica los Secrets.")
         else:
-            with st.spinner("Descargando maestro BCP y analizando cuentas..."):
+            with st.spinner(f"Descargando {nombre_archivo_excel} y analizando cuentas..."):
                 try:
-                    master_bytes = descargar(d["master_id"])
+                    master_bytes = descargar(target_id)
                     insumos = [(a.name, a.getvalue()) for a in archivos]
                     _, stats, rechazados = procesar(master_bytes, insumos, simulacion=True)
 
-                    st.session_state["bcp_insumos"] = insumos
-                    st.session_state["bcp_stats"] = stats
-                    st.session_state["bcp_rechazados"] = rechazados
+                    st.session_state[f"insumos_{prefix_key}"] = insumos
+                    st.session_state[f"stats_{prefix_key}"] = stats
+                    st.session_state[f"rechazados_{prefix_key}"] = rechazados
                 except Exception as e:
                     st.error(f"Error en simulación: {e}")
 
-    if "bcp_stats" in st.session_state:
-        stats = st.session_state["bcp_stats"]
-        rechazados = st.session_state["bcp_rechazados"]
+    if f"stats_{prefix_key}" in st.session_state:
+        stats = st.session_state[f"stats_{prefix_key}"]
+        rechazados = st.session_state[f"rechazados_{prefix_key}"]
 
         st.success("Simulación completada.")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Nuevos ingresos", stats["nuevos_ingresos"])
         c2.metric("Actualizados c/ histórico", stats["actualizados_con_historico"])
         c3.metric("Total registros en libro", stats["total_depositos"])
-        c4.metric("Observaciones / Avisos", stats["filas_con_observaciones"])
+        c4.metric("Observaciones / Omitidos", stats["filas_con_observaciones"])
 
         if stats.get("detalle_por_empresa"):
             st.subheader("Detalle por empresa")
@@ -64,38 +70,56 @@ if modulo == "🏦 Bancos BCP (9 Empresas)":
                 for r in rechazados:
                     st.write(f"- {r}")
 
-        if st.button("2) Confirmar y guardar en Google Drive", type="primary", key="save_bcp"):
+        if st.button("2) Confirmar y guardar en Google Drive", type="primary", key=f"save_{prefix_key}"):
             with st.spinner("Generando respaldo, ordenando fechas y guardando en Drive..."):
                 try:
-                    master_bytes = descargar(d["master_id"])
-                    nuevo_xlsm, _, _ = procesar(master_bytes, st.session_state["bcp_insumos"], simulacion=False)
+                    master_bytes = descargar(target_id)
+                    nuevo_xlsm, _, _ = procesar(
+                        master_bytes, st.session_state[f"insumos_{prefix_key}"], simulacion=False
+                    )
 
                     ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-                    copiar(d["master_id"], f"Backup_BCP_Diario_2026_{ts}.xlsm", d["backups_id"])
+                    copiar(target_id, f"Backup_{nombre_archivo_excel}_{ts}.xlsm", d["backups_id"])
                     actualizar(
-                        d["master_id"],
+                        target_id,
                         nuevo_xlsm,
                         "application/vnd.ms-excel.sheet.macroEnabled.12",
                     )
-                    for nombre_arch, cont_arch in st.session_state["bcp_insumos"]:
+                    for nombre_arch, cont_arch in st.session_state[f"insumos_{prefix_key}"]:
                         subir_nuevo(f"{ts}_{nombre_arch}", cont_arch, d["procesados_id"])
 
-                    st.success("¡Archivo 'BCP Diario 2026.xlsm' actualizado y ordenado por fecha en Google Drive!")
-                    del st.session_state["bcp_stats"]
-                    del st.session_state["bcp_insumos"]
+                    st.success(f"¡Archivo '{nombre_archivo_excel}' actualizado y ordenado por fecha en Drive!")
+                    del st.session_state[f"stats_{prefix_key}"]
+                    del st.session_state[f"insumos_{prefix_key}"]
                 except Exception as e:
                     st.error(f"Error al guardar: {e}")
 
 
 # ==============================================================================
-# MÓDULO 2: TARJETAS (CULQI Y MERCADO PAGO)
+# RUTEO POR MÓDULO
 # ==============================================================================
+if modulo == "🏪 Bancos Retail (FP Stores / Surco)":
+    render_modulo_bancos(
+        clave_secret="bcp_retail_id",
+        nombre_archivo_excel="BCP_Ferretti_2026.xlsm",
+        titulo_pagina="🏪 Bancos BCP — FP Stores & FP Surco",
+        prefix_key="retail",
+    )
+
+elif modulo == "🏢 Bancos Grupo (7 Empresas)":
+    render_modulo_bancos(
+        clave_secret="bcp_grupo_id",
+        nombre_archivo_excel="BCP_Grupo_Ferretti_2026.xlsm",
+        titulo_pagina="🏢 Bancos BCP — Grupo Ferretti (7 Empresas)",
+        prefix_key="grupo",
+    )
+
 elif modulo == "💳 Tarjetas (Culqi / Mercado Pago)":
     st.title("💳 Procesar pagos con Tarjeta (Culqi y Mercado Pago)")
 
     empresa_sel = st.selectbox(
         "Empresa a actualizar:",
-        ["FP STORES SAC", "FP STORES SURCO SAC (Próximamente)"],
+        ["FP STORES SAC", "FP STORES SURCO SAC"],
         key="emp_tarjetas",
     )
 
@@ -111,7 +135,7 @@ elif modulo == "💳 Tarjetas (Culqi / Mercado Pago)":
     st.info(f"Antes de procesar, cierra el archivo '{nombre_excel}' en Excel.")
 
     if not tarjetas_id:
-        st.warning(f"Aún no hay un archivo maestro configurado para {empresa_sel} en Secrets.")
+        st.warning(f"Falta configurar el ID maestro para {empresa_sel} en los Secrets.")
 
     archivos_tarj = st.file_uploader(
         "Reportes de Culqi o Mercado Pago (.xlsx)",
