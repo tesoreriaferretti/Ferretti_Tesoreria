@@ -7,7 +7,7 @@ import openpyxl
 import pandas as pd
 
 
-# Mapeo de las 19 cuentas BCP -> Pestañas exactas de tus dos libros maestros
+# Mapeo de las 21 cuentas BCP -> Pestañas exactas de tus dos libros maestros
 CUENTAS_A_HOJA = {
     # --- LIBRO 1: BCP_Ferretti_2026.xlsm ---
     # FP STORES SAC
@@ -32,9 +32,11 @@ CUENTAS_A_HOJA = {
     "1912124183103": ("Agricola", "191-2124183-1-03 - AGRICOLA SUNFIELDS SAC"),
     "19340255699120": ("Agricola", "193-40255699-1-20 - AGRICOLA SUNFIELDS SAC"),
 
-    # STORING SAC
+    # STORING SAC (4 cuentas: 2 anteriores + 2 nuevas)
     "1939406484088": ("Storing", "193-9406484-0-88 - STORING SAC"),
     "1939408786150": ("Storing", "193-9408786-1-50 - STORING SAC"),
+    "1918028671085": ("Storing", "191-8028671-0-85 - STORING S.A.C."),
+    "1918028670185": ("Storing", "191-8028670-1-85 - STORING S.A.C."),
 
     # MELAMINEX SAC
     "1910171089070": ("Melaminex", "191-0171089-0-70 - MELAMINEX SAC"),
