@@ -59,7 +59,7 @@ def resolver_hoja_culqi(comercio_val, moneda_val):
     return None
 
 
-def clonar_estilo_fila(ws, fila_modelo, fila_destino, max_col):
+def clonar_estilo_fila(ws, fila_modelo, fila_destino, max_col, proteger_relleno_hasta_col=3):
     """Copia alto de fila, fuente, alineacion, bordes y formato numerico de la ultima fila previa."""
     if fila_modelo is None or fila_modelo == fila_destino:
         return
@@ -76,7 +76,7 @@ def clonar_estilo_fila(ws, fila_modelo, fila_destino, max_col):
             dst.alignment = copy(src.alignment)
             dst.border = copy(src.border)
             dst.number_format = src.number_format
-            if col_idx < 4:
+            if col_idx <= proteger_relleno_hasta_col:
                 dst.fill = copy(src.fill)
 
 
@@ -84,7 +84,7 @@ def asegurar_formato_condicional_culqi(ws):
     """
     Aplica las 3 reglas exactas en D5:AK5000 (Plomo > Amarillo > Celeste):
       1. Plomo: AK (Estado) es rechazada, anulada, pendiente, devuelta o extornada.
-      2. Amarillo: AZ (Nro. Pedido) tiene informacion (prevalece sobre celeste).
+      2. Amarillo: AZ (Nro. Pedido) tiene informacion real (ignora vacio y '-').
       3. Celeste: BF (Observaciones) tiene informacion.
     """
     rango = "D5:AK5000"
@@ -95,12 +95,16 @@ def asegurar_formato_condicional_culqi(ws):
     fill_celeste = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
 
     regla_plomo = FormulaRule(
-        formula=['OR(ISNUMBER(SEARCH("rechazad",$AK5)),ISNUMBER(SEARCH("anulad",$AK5)),ISNUMBER(SEARCH("pendient",$AK5)),ISNUMBER(SEARCH("devuelt",$AK5)),ISNUMBER(SEARCH("extorn",$AK5)))'],
+        formula=[
+            'OR(ISNUMBER(SEARCH("rechazad",$AK5)),ISNUMBER(SEARCH("anulad",$AK5)),'
+            'ISNUMBER(SEARCH("pendient",$AK5)),ISNUMBER(SEARCH("devuelt",$AK5)),'
+            'ISNUMBER(SEARCH("extorn",$AK5)))'
+        ],
         stopIfTrue=True,
         fill=fill_plomo,
     )
     regla_amarillo = FormulaRule(
-        formula=['TRIM($AZ5)<>""'],
+        formula=['AND(TRIM($AZ5)<>"",TRIM($AZ5)<>"-")'],
         stopIfTrue=True,
         fill=fill_amarillo,
     )
@@ -113,6 +117,62 @@ def asegurar_formato_condicional_culqi(ws):
     ws.conditional_formatting.add(rango, regla_plomo)
     ws.conditional_formatting.add(rango, regla_amarillo)
     ws.conditional_formatting.add(rango, regla_celeste)
+
+
+def asegurar_formato_condicional_mpago(ws):
+    """
+    Aplica las reglas de color en MPago (A2:N5000) tomando como referencia la columna B:
+      1. Celeste: B = 'Retiro de dinero a cuenta bancaria'
+      2. Anaranjado: B = 'Anulación parcial de costo de Mercado Pago' o 'Devolución parcial de cobro'
+      3. Amarillo: B = 'Cobro' con dato en F (excluyendo '-')
+      4. Amarillo: B = 'Costo de Mercado Pago' cuyo ID en D coincide con un 'Cobro' ya pintado (F con dato)
+    """
+    rango = "A2:N5000"
+    ws.conditional_formatting._cf_rules.clear()
+
+    fill_celeste = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+    fill_naranja = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    fill_amarillo = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+    regla_celeste = FormulaRule(
+        formula=['TRIM($B2)="Retiro de dinero a cuenta bancaria"'],
+        stopIfTrue=True,
+        fill=fill_celeste,
+    )
+    regla_naranja = FormulaRule(
+        formula=[
+            'OR(TRIM($B2)="Anulación parcial de costo de Mercado Pago",'
+            'TRIM($B2)="Devolución parcial de cobro")'
+        ],
+        stopIfTrue=True,
+        fill=fill_naranja,
+    )
+    regla_cobro_amarillo = FormulaRule(
+        formula=['AND(TRIM($B2)="Cobro",TRIM($F2)<>"",TRIM($F2)<>"-")'],
+        stopIfTrue=True,
+        fill=fill_amarillo,
+    )
+    regla_costo_amarillo = FormulaRule(
+        formula=[
+            'AND(TRIM($B2)="Costo de Mercado Pago",TRIM($D2)<>"",'
+            'COUNTIFS($B$2:$B$5000,"Cobro",$D$2:$D$5000,$D2,$F$2:$F$5000,"<>",$F$2:$F$5000,"<>-")>0)'
+        ],
+        stopIfTrue=True,
+        fill=fill_amarillo,
+    )
+
+    ws.conditional_formatting.add(rango, regla_celeste)
+    ws.conditional_formatting.add(rango, regla_naranja)
+    ws.conditional_formatting.add(rango, regla_cobro_amarillo)
+    ws.conditional_formatting.add(rango, regla_costo_amarillo)
+
+
+def _limpiar_guion_pedido(norm_h, val_clean):
+    """Evita que un guion '-' aislado se guarde en Nro. Pedido (AZ)."""
+    if norm_h in ("nro pedido", "numero pedido", "numero de pedido"):
+        if limpiar_str(val_clean) == "-":
+            return ""
+    return val_clean
 
 
 def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
@@ -209,6 +269,7 @@ def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
                                 m_num = parsear_monto(val_clean)
                                 if m_num is not None:
                                     val_clean = m_num
+                            val_clean = _limpiar_guion_pedido(norm_h, val_clean)
                             ws.cell(r_dest, c_idx).value = val_clean
                 h_data["actualizados"] += 1
         else:
@@ -225,9 +286,16 @@ def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
                             m_num = parsear_monto(val_clean)
                             if m_num is not None:
                                 val_clean = m_num
+                        val_clean = _limpiar_guion_pedido(norm_h, val_clean)
                         ws.cell(r_dest, c_idx).value = val_clean
 
-                clonar_estilo_fila(ws, h_data["fila_modelo"], r_dest, h_data["max_col"])
+                clonar_estilo_fila(
+                    ws,
+                    h_data["fila_modelo"],
+                    r_dest,
+                    h_data["max_col"],
+                    proteger_relleno_hasta_col=3,
+                )
                 if h_data["fila_modelo"] is None:
                     h_data["fila_modelo"] = r_dest
             h_data["nuevos"] += 1
@@ -264,7 +332,7 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
 
     ws = wb["MPago"]
     cols_maestro = {}
-    max_col_mp = ws.max_column
+    max_col_mp = max(ws.max_column, 14)  # Hasta N = 14
     for c in range(1, ws.max_column + 1):
         h_val = limpiar_str(ws.cell(1, c).value)
         if h_val:
@@ -272,12 +340,14 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
 
     col_op = cols_maestro.get("Número de operación") or cols_maestro.get("ID de operación en Mercado Pago") or 4
 
+    # Clave compuesta (Operacion + Tipo de movimiento) para no perder el Costo asociado al mismo ID de Cobro
     existentes = set()
     ultima_fila = 1
     for r in range(2, ws.max_row + 1):
         val_op = limpiar_str(ws.cell(r, col_op).value)
-        if val_op:
-            existentes.add(val_op)
+        val_tipo = limpiar_str(ws.cell(r, 2).value)
+        if val_op or val_tipo:
+            existentes.add(f"{val_op}|{val_tipo}")
             ultima_fila = r
 
     fila_modelo = ultima_fila if ultima_fila >= 2 else None
@@ -285,22 +355,39 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
 
     for _, row in df.iterrows():
         op_id = limpiar_str(
-            row.get("Número de operación") if "Número de operación" in row.index else row.get("ID de operación en Mercado Pago", "")
+            row.get("Número de operación")
+            if "Número de operación" in row.index
+            else row.get("ID de operación en Mercado Pago", "")
         )
-        if not op_id or op_id in existentes:
+        tipo_mov = limpiar_str(
+            row.get("Tipo de operación")
+            if "Tipo de operación" in row.index
+            else row.get("Descripción", "")
+        )
+        clave_mp = f"{op_id}|{tipo_mov}"
+        if (not op_id and not tipo_mov) or clave_mp in existentes:
             continue
 
-        existentes.add(op_id)
+        existentes.add(clave_mp)
         ultima_fila += 1
         if not simulacion:
             for h_name, c_idx in cols_maestro.items():
                 if h_name in row.index and pd.notna(row[h_name]):
                     val = row[h_name]
                     ws.cell(ultima_fila, c_idx).value = val.item() if hasattr(val, "item") else val
-            clonar_estilo_fila(ws, fila_modelo, ultima_fila, max_col_mp)
+            clonar_estilo_fila(
+                ws,
+                fila_modelo,
+                ultima_fila,
+                max_col_mp,
+                proteger_relleno_hasta_col=0,
+            )
             if fila_modelo is None:
                 fila_modelo = ultima_fila
         nuevos_mp += 1
+
+    if not simulacion:
+        asegurar_formato_condicional_mpago(ws)
 
     if nuevos_mp > 0:
         resumen.append(f"• MPago: {nuevos_mp} operaciones nuevas agregadas.")
