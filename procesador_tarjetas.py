@@ -2,6 +2,7 @@
 from copy import copy
 from io import BytesIO
 import re
+import unicodedata
 
 import openpyxl
 from openpyxl.formatting.rule import FormulaRule
@@ -9,25 +10,17 @@ from openpyxl.styles import PatternFill
 import pandas as pd
 
 
-# Comercios permitidos por empresa
-COMERCIOS_POR_EMPRESA = {
-    "FP_STORES": ["FP STORES"],
-    "FP_SURCO": ["FP STORES SURCO", "FP SURCO"],
-}
-
-# Mapeo de hojas Culqi: (Producto, Moneda) -> nombre de pestaña
-MAPA_CULQI = {
-    ("POS", "PEN"): "Culqi POS MN",
-    ("POS", "USD"): "Culqi POS ME",
-    ("PAYMENT_LINK", "PEN"): "Culqi Link MN",
-    ("PAYMENT_LINK", "USD"): "Culqi Link ME",
-}
-
-
 def limpiar_str(val):
     if val is None or (not isinstance(val, str) and pd.isna(val)):
         return ""
     return re.sub(r"\s+", " ", str(val)).strip()
+
+
+def normalizar_clave_col(texto):
+    s = limpiar_str(texto).lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+    return s
 
 
 def parsear_monto(val):
@@ -42,28 +35,39 @@ def parsear_monto(val):
         return None
 
 
-def pertenece_a_empresa(comercio_raw, empresa_objetivo):
-    c = limpiar_str(comercio_raw).upper()
-    if not c:
+def pertenece_a_empresa(empresa_val, comercio_val, empresa_objetivo):
+    emp = limpiar_str(empresa_val).upper()
+    com = limpiar_str(comercio_val).upper()
+    texto = f"{emp} {com}"
+    if not texto.strip():
         return False
     if empresa_objetivo == "FP_STORES":
-        return "FP STORES" in c and "SURCO" not in c
+        return ("FP STORES" in texto or "FERRETTI" in texto) and "SURCO" not in texto
     if empresa_objetivo == "FP_SURCO":
-        return "SURCO" in c
+        return "SURCO" in texto
     return False
 
 
+def resolver_hoja_culqi(comercio_val, moneda_val):
+    com = limpiar_str(comercio_val).upper()
+    mon = limpiar_str(moneda_val).upper()
+    es_link = "LINK" in com
+    if mon == "PEN":
+        return "Culqi Link MN" if es_link else "Culqi POS MN"
+    if mon == "USD":
+        return "Culqi Link ME" if es_link else "Culqi POS ME"
+    return None
+
+
 def clonar_estilo_fila(ws, fila_modelo, fila_destino, max_col):
-    """Copia alto de fila, fuente, alineacion, bordes y formato numerico de una fila modelo."""
+    """Copia alto de fila, fuente, alineacion, bordes y formato numerico de la ultima fila previa."""
     if fila_modelo is None or fila_modelo == fila_destino:
         return
 
-    # 1) Copiar alto exacto de fila
     alto = ws.row_dimensions[fila_modelo].height
     if alto is not None:
         ws.row_dimensions[fila_destino].height = alto
 
-    # 2) Copiar estilos celda por celda
     for col_idx in range(1, max_col + 1):
         src = ws.cell(fila_modelo, col_idx)
         dst = ws.cell(fila_destino, col_idx)
@@ -72,13 +76,17 @@ def clonar_estilo_fila(ws, fila_modelo, fila_destino, max_col):
             dst.alignment = copy(src.alignment)
             dst.border = copy(src.border)
             dst.number_format = src.number_format
-            # No copiamos el relleno manual en D:AK porque ahi manda el formato condicional
             if col_idx < 4:
                 dst.fill = copy(src.fill)
 
 
 def asegurar_formato_condicional_culqi(ws):
-    """Asegura jerarquia de colores (Plomo > Amarillo > Celeste) en D5:AK5000."""
+    """
+    Aplica las 3 reglas exactas en D5:AK5000 (Plomo > Amarillo > Celeste):
+      1. Plomo: AK (Estado) es rechazada, anulada, pendiente, devuelta o extornada.
+      2. Amarillo: AZ (Nro. Pedido) tiene informacion (prevalece sobre celeste).
+      3. Celeste: BF (Observaciones) tiene informacion.
+    """
     rango = "D5:AK5000"
     ws.conditional_formatting._cf_rules.clear()
 
@@ -87,17 +95,17 @@ def asegurar_formato_condicional_culqi(ws):
     fill_celeste = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
 
     regla_plomo = FormulaRule(
-        formula=['OR(ISNUMBER(SEARCH("devuelta",$F5)),ISNUMBER(SEARCH("extorn",$F5)),ISNUMBER(SEARCH("anulad",$F5)))'],
+        formula=['OR(ISNUMBER(SEARCH("rechazad",$AK5)),ISNUMBER(SEARCH("anulad",$AK5)),ISNUMBER(SEARCH("pendient",$AK5)),ISNUMBER(SEARCH("devuelt",$AK5)),ISNUMBER(SEARCH("extorn",$AK5)))'],
         stopIfTrue=True,
         fill=fill_plomo,
     )
     regla_amarillo = FormulaRule(
-        formula=['AND(TRIM($A5)<>"",TRIM($B5)="",TRIM($C5)="")'],
+        formula=['TRIM($AZ5)<>""'],
         stopIfTrue=True,
         fill=fill_amarillo,
     )
     regla_celeste = FormulaRule(
-        formula=['AND(TRIM($A5)<>"",OR(TRIM($B5)<>"",TRIM($C5)<>""))'],
+        formula=['TRIM($BF5)<>""'],
         stopIfTrue=True,
         fill=fill_celeste,
     )
@@ -110,8 +118,8 @@ def asegurar_formato_condicional_culqi(ws):
 def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
     header_idx = None
     for idx in range(min(15, len(df_raw))):
-        fila_vals = [limpiar_str(x) for x in df_raw.iloc[idx].tolist()]
-        if "ID de Venta" in fila_vals and "Estado" in fila_vals:
+        fila_vals = [normalizar_clave_col(x) for x in df_raw.iloc[idx].tolist()]
+        if ("id venta" in fila_vals or "id de venta" in fila_vals) and "estado" in fila_vals:
             header_idx = idx
             break
     if header_idx is None:
@@ -121,28 +129,32 @@ def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
     df = df_raw.iloc[header_idx + 1:].copy()
     df.columns = headers
 
-    nuevos_total = 0
-    actualizados_total = 0
+    mapa_cols_df = {normalizar_clave_col(c): c for c in headers if c}
+    col_df_empresa = mapa_cols_df.get("empresa", "Empresa")
+    col_df_comercio = mapa_cols_df.get("comercio") or mapa_cols_df.get("nombre comercial") or "Comercio"
+    col_df_moneda = mapa_cols_df.get("moneda", "Moneda")
+    col_df_id_venta = mapa_cols_df.get("id venta") or mapa_cols_df.get("id de venta") or "ID Venta"
+    col_df_estado = mapa_cols_df.get("estado", "Estado")
 
-    for (prod_code, mon_code), hoja_nombre in MAPA_CULQI.items():
-        if hoja_nombre not in wb.sheetnames:
+    info_hojas = {}
+    for h_nom in ["Culqi POS MN", "Culqi POS ME", "Culqi Link MN", "Culqi Link ME"]:
+        if h_nom not in wb.sheetnames:
             continue
-        ws = wb[hoja_nombre]
-
-        # Leer encabezados de la fila 4 del maestro (columnas D en adelante)
+        ws = wb[h_nom]
         cols_maestro = {}
-        max_col_maestro = 37  # Columna AK = 37
-        for c in range(4, ws.max_column + 1):
+        max_col_maestro = max(ws.max_column, 58)  # Hasta BF = 58
+        col_id = 4    # D
+        col_est = 37  # AK
+
+        for c in range(1, ws.max_column + 1):
             h_val = limpiar_str(ws.cell(4, c).value)
             if h_val:
-                cols_maestro[h_val] = c
-                if c > max_col_maestro:
-                    max_col_maestro = c
+                cols_maestro[normalizar_clave_col(h_val)] = c
+                if normalizar_clave_col(h_val) in ("id venta", "id de venta"):
+                    col_id = c
+                elif normalizar_clave_col(h_val) == "estado":
+                    col_est = c
 
-        col_id = cols_maestro.get("ID de Venta", 4)
-        col_estado = cols_maestro.get("Estado", 6)
-
-        # Mapear IDs existentes y detectar ultima fila con datos para usarla de modelo
         existentes = {}
         ultima_fila = 4
         for r in range(5, ws.max_row + 1):
@@ -150,61 +162,85 @@ def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
             if val_id:
                 existentes[val_id] = r
                 ultima_fila = r
-            elif any(ws.cell(r, c).value is not None for c in range(1, max_col_maestro + 1)):
-                ultima_fila = r
 
-        fila_modelo = ultima_fila if ultima_fila >= 5 else None
+        info_hojas[h_nom] = {
+            "ws": ws,
+            "cols_maestro": cols_maestro,
+            "max_col": max_col_maestro,
+            "col_id": col_id,
+            "col_est": col_est,
+            "existentes": existentes,
+            "ultima_fila": ultima_fila,
+            "fila_modelo": ultima_fila if ultima_fila >= 5 else None,
+            "nuevos": 0,
+            "actualizados": 0,
+        }
 
-        nuevos_hoja = 0
-        act_hoja = 0
+    for _, row in df.iterrows():
+        emp_val = row.get(col_df_empresa, "") if col_df_empresa in row.index else ""
+        com_val = row.get(col_df_comercio, "") if col_df_comercio in row.index else ""
+        if not pertenece_a_empresa(emp_val, com_val, empresa_objetivo):
+            continue
 
-        for _, row in df.iterrows():
-            comercio = row.get("Nombre Comercial", "")
-            if not pertenece_a_empresa(comercio, empresa_objetivo):
-                continue
+        mon_val = row.get(col_df_moneda, "") if col_df_moneda in row.index else ""
+        hoja_dest = resolver_hoja_culqi(com_val, mon_val)
+        if not hoja_dest or hoja_dest not in info_hojas:
+            continue
 
-            prod = limpiar_str(row.get("Producto", "")).upper()
-            mon = limpiar_str(row.get("Moneda", "")).upper()
-            if prod != prod_code or mon != mon_code:
-                continue
+        h_data = info_hojas[hoja_dest]
+        ws = h_data["ws"]
+        id_venta = limpiar_str(row.get(col_df_id_venta, ""))
+        if not id_venta:
+            continue
 
-            id_venta = limpiar_str(row.get("ID de Venta", ""))
-            if not id_venta:
-                continue
+        estado_nuevo = limpiar_str(row.get(col_df_estado, ""))
 
-            estado_nuevo = limpiar_str(row.get("Estado", ""))
-
-            if id_venta in existentes:
-                r_dest = existentes[id_venta]
-                estado_actual = limpiar_str(ws.cell(r_dest, col_estado).value)
-                if estado_nuevo and estado_nuevo.lower() != estado_actual.lower():
-                    if not simulacion:
-                        for h_name, c_idx in cols_maestro.items():
-                            if h_name in row.index and pd.notna(row[h_name]):
-                                val = row[h_name]
-                                ws.cell(r_dest, c_idx).value = val.item() if hasattr(val, "item") else val
-                    act_hoja += 1
-            else:
-                ultima_fila += 1
-                existentes[id_venta] = ultima_fila
+        if id_venta in h_data["existentes"]:
+            r_dest = h_data["existentes"][id_venta]
+            estado_actual = limpiar_str(ws.cell(r_dest, h_data["col_est"]).value)
+            if estado_nuevo and estado_nuevo.lower() != estado_actual.lower():
                 if not simulacion:
-                    for h_name, c_idx in cols_maestro.items():
-                        if h_name in row.index and pd.notna(row[h_name]):
-                            val = row[h_name]
-                            ws.cell(ultima_fila, c_idx).value = val.item() if hasattr(val, "item") else val
-                    # Aplicar exactamente el alto de fila, alineacion, fuente y bordes anteriores
-                    clonar_estilo_fila(ws, fila_modelo, ultima_fila, max_col_maestro)
-                    if fila_modelo is None:
-                        fila_modelo = ultima_fila
-                nuevos_hoja += 1
+                    for norm_h, c_idx in h_data["cols_maestro"].items():
+                        col_df_match = mapa_cols_df.get(norm_h)
+                        if col_df_match and col_df_match in row.index and pd.notna(row[col_df_match]):
+                            val = row[col_df_match]
+                            val_clean = val.item() if hasattr(val, "item") else val
+                            if norm_h == "venta final":
+                                m_num = parsear_monto(val_clean)
+                                if m_num is not None:
+                                    val_clean = m_num
+                            ws.cell(r_dest, c_idx).value = val_clean
+                h_data["actualizados"] += 1
+        else:
+            h_data["ultima_fila"] += 1
+            r_dest = h_data["ultima_fila"]
+            h_data["existentes"][id_venta] = r_dest
+            if not simulacion:
+                for norm_h, c_idx in h_data["cols_maestro"].items():
+                    col_df_match = mapa_cols_df.get(norm_h)
+                    if col_df_match and col_df_match in row.index and pd.notna(row[col_df_match]):
+                        val = row[col_df_match]
+                        val_clean = val.item() if hasattr(val, "item") else val
+                        if norm_h == "venta final":
+                            m_num = parsear_monto(val_clean)
+                            if m_num is not None:
+                                val_clean = m_num
+                        ws.cell(r_dest, c_idx).value = val_clean
 
+                clonar_estilo_fila(ws, h_data["fila_modelo"], r_dest, h_data["max_col"])
+                if h_data["fila_modelo"] is None:
+                    h_data["fila_modelo"] = r_dest
+            h_data["nuevos"] += 1
+
+    nuevos_total = 0
+    for h_nom, h_data in info_hojas.items():
         if not simulacion:
-            asegurar_formato_condicional_culqi(ws)
-
-        if nuevos_hoja > 0 or act_hoja > 0:
-            resumen.append(f"• {hoja_nombre}: {nuevos_hoja} nuevos, {act_hoja} actualizados (aprobada → abonada).")
-        nuevos_total += nuevos_hoja
-        actualizados_total += act_hoja
+            asegurar_formato_condicional_culqi(h_data["ws"])
+        if h_data["nuevos"] > 0 or h_data["actualizados"] > 0:
+            resumen.append(
+                f"• {h_nom}: {h_data['nuevos']} nuevos, {h_data['actualizados']} actualizados (aprobada → abonada)."
+            )
+        nuevos_total += h_data["nuevos"]
 
     return nuevos_total
 
@@ -228,12 +264,11 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
 
     ws = wb["MPago"]
     cols_maestro = {}
-    max_col_mp = 1
+    max_col_mp = ws.max_column
     for c in range(1, ws.max_column + 1):
         h_val = limpiar_str(ws.cell(1, c).value)
         if h_val:
             cols_maestro[h_val] = c
-            max_col_mp = c
 
     col_op = cols_maestro.get("Número de operación") or cols_maestro.get("ID de operación en Mercado Pago") or 4
 
@@ -243,8 +278,6 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
         val_op = limpiar_str(ws.cell(r, col_op).value)
         if val_op:
             existentes.add(val_op)
-            ultima_fila = r
-        elif any(ws.cell(r, c).value is not None for c in range(1, max_col_mp + 1)):
             ultima_fila = r
 
     fila_modelo = ultima_fila if ultima_fila >= 2 else None
@@ -264,7 +297,6 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
                 if h_name in row.index and pd.notna(row[h_name]):
                     val = row[h_name]
                     ws.cell(ultima_fila, c_idx).value = val.item() if hasattr(val, "item") else val
-            # Clonar exactamente el alto de fila, fuente, alineacion y bordes anteriores
             clonar_estilo_fila(ws, fila_modelo, ultima_fila, max_col_mp)
             if fila_modelo is None:
                 fila_modelo = ultima_fila
@@ -289,11 +321,11 @@ def procesar_tarjetas(master_bytes, insumos, empresa_objetivo="FP_STORES", simul
                 continue
 
             muestra = " ".join(
-                limpiar_str(x) for x in df_raw.iloc[:12].values.flatten() if pd.notna(x)
+                normalizar_clave_col(x) for x in df_raw.iloc[:12].values.flatten() if pd.notna(x)
             )
-            if "ID de Venta" in muestra and "Nombre Comercial" in muestra:
+            if ("id venta" in muestra or "id de venta" in muestra) and ("comercio" in muestra or "nombre comercial" in muestra):
                 total_nuevos += _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion)
-            elif "Mercado Pago" in muestra or "Número de operación" in muestra:
+            elif "mercado pago" in muestra or "numero de operacion" in muestra:
                 total_nuevos += _procesar_mpago(wb, df_raw, resumen, simulacion)
 
     if not resumen:
