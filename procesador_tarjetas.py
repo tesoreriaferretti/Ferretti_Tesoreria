@@ -121,28 +121,34 @@ def asegurar_formato_condicional_culqi(ws):
 
 def asegurar_formato_condicional_mpago(ws):
     """
-    Aplica las reglas de color en MPago (A2:E5000) tomando como referencia la columna B:
-      1. Celeste: B = 'Retiro de dinero a cuenta bancaria'
-      2. Anaranjado: B = 'Anulación parcial de costo de Mercado Pago' o 'Devolución parcial de cobro'
-      3. Amarillo: B = 'Cobro' con dato en F (Nro. Pedido)
-      4. Amarillo: B = 'Costo de Mercado Pago' cuya Operacion Relacionada (D) coincide con un 'Cobro' ya pintado
+    Aplica las reglas de color en MPago tomando como referencia la columna B:
+      1. Celeste (A2:J5000): B = 'Retiro de dinero a cuenta bancaria'
+      2. Anaranjado (A2:E5000): B = 'Anulación parcial de costo de Mercado Pago',
+         'Devolución parcial de cobro', 'Anulación de costo de Mercado Pago' o 'Devolución de cobro'
+      3. Amarillo (A2:E5000): B = 'Cobro' con dato en F (Nro. Pedido)
+      4. Amarillo (A2:E5000): B = 'Costo de Mercado Pago' cuyo ID en D coincide con un 'Cobro' ya pintado
     """
-    rango = "A2:E5000"
     ws.conditional_formatting._cf_rules.clear()
 
     fill_celeste = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
     fill_naranja = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     fill_amarillo = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
 
+    # 1. Celeste hasta columna J (A2:J5000)
     regla_celeste = FormulaRule(
         formula=['TRIM($B2)="Retiro de dinero a cuenta bancaria"'],
         stopIfTrue=True,
         fill=fill_celeste,
     )
+    ws.conditional_formatting.add("A2:J5000", regla_celeste)
+
+    # 2. Anaranjado y Amarillo en A2:E5000
     regla_naranja = FormulaRule(
         formula=[
             'OR(TRIM($B2)="Anulación parcial de costo de Mercado Pago",'
-            'TRIM($B2)="Devolución parcial de cobro")'
+            'TRIM($B2)="Devolución parcial de cobro",'
+            'TRIM($B2)="Anulación de costo de Mercado Pago",'
+            'TRIM($B2)="Devolución de cobro")'
         ],
         stopIfTrue=True,
         fill=fill_naranja,
@@ -161,10 +167,9 @@ def asegurar_formato_condicional_mpago(ws):
         fill=fill_amarillo,
     )
 
-    ws.conditional_formatting.add(rango, regla_celeste)
-    ws.conditional_formatting.add(rango, regla_naranja)
-    ws.conditional_formatting.add(rango, regla_cobro_amarillo)
-    ws.conditional_formatting.add(rango, regla_costo_amarillo)
+    ws.conditional_formatting.add("A2:E5000", regla_naranja)
+    ws.conditional_formatting.add("A2:E5000", regla_cobro_amarillo)
+    ws.conditional_formatting.add("A2:E5000", regla_costo_amarillo)
 
 
 def _limpiar_guion_celda(val_clean):
@@ -345,7 +350,6 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
             if norm_h == "numero de movimiento":
                 col_mov_maestro = c
 
-    # Indexar movimientos existentes por Columna C (Número de Movimiento)
     existentes = set()
     ultima_fila = 1
     for r in range(2, ws.max_row + 1):
