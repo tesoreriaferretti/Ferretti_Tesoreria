@@ -121,13 +121,13 @@ def asegurar_formato_condicional_culqi(ws):
 
 def asegurar_formato_condicional_mpago(ws):
     """
-    Aplica las reglas de color en MPago (A2:N5000) tomando como referencia la columna B:
+    Aplica las reglas de color en MPago (A2:E5000) tomando como referencia la columna B:
       1. Celeste: B = 'Retiro de dinero a cuenta bancaria'
       2. Anaranjado: B = 'Anulación parcial de costo de Mercado Pago' o 'Devolución parcial de cobro'
-      3. Amarillo: B = 'Cobro' con dato en F (excluyendo '-')
-      4. Amarillo: B = 'Costo de Mercado Pago' cuyo ID en D coincide con un 'Cobro' ya pintado (F con dato)
+      3. Amarillo: B = 'Cobro' con dato en F (Nro. Pedido)
+      4. Amarillo: B = 'Costo de Mercado Pago' cuya Operacion Relacionada (D) coincide con un 'Cobro' ya pintado
     """
-    rango = "A2:N5000"
+    rango = "A2:E5000"
     ws.conditional_formatting._cf_rules.clear()
 
     fill_celeste = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
@@ -167,11 +167,10 @@ def asegurar_formato_condicional_mpago(ws):
     ws.conditional_formatting.add(rango, regla_costo_amarillo)
 
 
-def _limpiar_guion_pedido(norm_h, val_clean):
-    """Evita que un guion '-' aislado se guarde en Nro. Pedido (AZ)."""
-    if norm_h in ("nro pedido", "numero pedido", "numero de pedido"):
-        if limpiar_str(val_clean) == "-":
-            return ""
+def _limpiar_guion_celda(val_clean):
+    """Convierte cualquier guion aislado '-' del reporte de Culqi en celda vacia."""
+    if isinstance(val_clean, str) and val_clean.strip() == "-":
+        return None
     return val_clean
 
 
@@ -202,9 +201,9 @@ def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
             continue
         ws = wb[h_nom]
         cols_maestro = {}
-        max_col_maestro = max(ws.max_column, 58)  # Hasta BF = 58
-        col_id = 4    # D
-        col_est = 37  # AK
+        max_col_maestro = max(ws.max_column, 58)
+        col_id = 4
+        col_est = 37
 
         for c in range(1, ws.max_column + 1):
             h_val = limpiar_str(ws.cell(4, c).value)
@@ -269,7 +268,7 @@ def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
                                 m_num = parsear_monto(val_clean)
                                 if m_num is not None:
                                     val_clean = m_num
-                            val_clean = _limpiar_guion_pedido(norm_h, val_clean)
+                            val_clean = _limpiar_guion_celda(val_clean)
                             ws.cell(r_dest, c_idx).value = val_clean
                 h_data["actualizados"] += 1
         else:
@@ -286,7 +285,7 @@ def _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion):
                             m_num = parsear_monto(val_clean)
                             if m_num is not None:
                                 val_clean = m_num
-                        val_clean = _limpiar_guion_pedido(norm_h, val_clean)
+                        val_clean = _limpiar_guion_celda(val_clean)
                         ws.cell(r_dest, c_idx).value = val_clean
 
                 clonar_estilo_fila(
@@ -319,8 +318,8 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
 
     header_idx = None
     for idx in range(min(15, len(df_raw))):
-        fila_vals = [limpiar_str(x) for x in df_raw.iloc[idx].tolist()]
-        if "Número de operación" in fila_vals or "ID de operación en Mercado Pago" in fila_vals:
+        fila_vals = [normalizar_clave_col(x) for x in df_raw.iloc[idx].tolist()]
+        if "numero de movimiento" in fila_vals and "tipo de operacion" in fila_vals:
             header_idx = idx
             break
     if header_idx is None:
@@ -330,51 +329,53 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
     df = df_raw.iloc[header_idx + 1:].copy()
     df.columns = headers
 
+    mapa_cols_df = {normalizar_clave_col(c): c for c in headers if c}
+    col_df_mov = mapa_cols_df.get("numero de movimiento", "Número de Movimiento")
+
     ws = wb["MPago"]
     cols_maestro = {}
-    max_col_mp = max(ws.max_column, 14)  # Hasta N = 14
+    max_col_mp = max(ws.max_column, 12)
+    col_mov_maestro = 3  # Columna C: Número de Movimiento
+
     for c in range(1, ws.max_column + 1):
         h_val = limpiar_str(ws.cell(1, c).value)
         if h_val:
-            cols_maestro[h_val] = c
+            norm_h = normalizar_clave_col(h_val)
+            cols_maestro[norm_h] = c
+            if norm_h == "numero de movimiento":
+                col_mov_maestro = c
 
-    col_op = cols_maestro.get("Número de operación") or cols_maestro.get("ID de operación en Mercado Pago") or 4
-
-    # Clave compuesta (Operacion + Tipo de movimiento) para no perder el Costo asociado al mismo ID de Cobro
+    # Indexar movimientos existentes por Columna C (Número de Movimiento)
     existentes = set()
     ultima_fila = 1
     for r in range(2, ws.max_row + 1):
-        val_op = limpiar_str(ws.cell(r, col_op).value)
-        val_tipo = limpiar_str(ws.cell(r, 2).value)
-        if val_op or val_tipo:
-            existentes.add(f"{val_op}|{val_tipo}")
+        val_mov = limpiar_str(ws.cell(r, col_mov_maestro).value)
+        if val_mov:
+            existentes.add(val_mov)
             ultima_fila = r
 
     fila_modelo = ultima_fila if ultima_fila >= 2 else None
     nuevos_mp = 0
 
     for _, row in df.iterrows():
-        op_id = limpiar_str(
-            row.get("Número de operación")
-            if "Número de operación" in row.index
-            else row.get("ID de operación en Mercado Pago", "")
-        )
-        tipo_mov = limpiar_str(
-            row.get("Tipo de operación")
-            if "Tipo de operación" in row.index
-            else row.get("Descripción", "")
-        )
-        clave_mp = f"{op_id}|{tipo_mov}"
-        if (not op_id and not tipo_mov) or clave_mp in existentes:
+        mov_id = limpiar_str(row.get(col_df_mov, ""))
+        if not mov_id or mov_id in existentes:
             continue
 
-        existentes.add(clave_mp)
+        existentes.add(mov_id)
         ultima_fila += 1
         if not simulacion:
-            for h_name, c_idx in cols_maestro.items():
-                if h_name in row.index and pd.notna(row[h_name]):
-                    val = row[h_name]
-                    ws.cell(ultima_fila, c_idx).value = val.item() if hasattr(val, "item") else val
+            for norm_h, c_idx in cols_maestro.items():
+                col_df_match = mapa_cols_df.get(norm_h)
+                if col_df_match and col_df_match in row.index and pd.notna(row[col_df_match]):
+                    val = row[col_df_match]
+                    val_clean = val.item() if hasattr(val, "item") else val
+                    if norm_h == "importe":
+                        m_num = parsear_monto(val_clean)
+                        if m_num is not None:
+                            val_clean = m_num
+                    ws.cell(ultima_fila, c_idx).value = val_clean
+
             clonar_estilo_fila(
                 ws,
                 fila_modelo,
@@ -390,7 +391,7 @@ def _procesar_mpago(wb, df_raw, resumen, simulacion):
         asegurar_formato_condicional_mpago(ws)
 
     if nuevos_mp > 0:
-        resumen.append(f"• MPago: {nuevos_mp} operaciones nuevas agregadas.")
+        resumen.append(f"• MPago: {nuevos_mp} movimientos nuevos agregados.")
 
     return nuevos_mp
 
@@ -412,7 +413,7 @@ def procesar_tarjetas(master_bytes, insumos, empresa_objetivo="FP_STORES", simul
             )
             if ("id venta" in muestra or "id de venta" in muestra) and ("comercio" in muestra or "nombre comercial" in muestra):
                 total_nuevos += _procesar_culqi(wb, df_raw, empresa_objetivo, resumen, simulacion)
-            elif "mercado pago" in muestra or "numero de operacion" in muestra:
+            elif "numero de movimiento" in muestra and "operacion relacionada" in muestra:
                 total_nuevos += _procesar_mpago(wb, df_raw, resumen, simulacion)
 
     if not resumen:
